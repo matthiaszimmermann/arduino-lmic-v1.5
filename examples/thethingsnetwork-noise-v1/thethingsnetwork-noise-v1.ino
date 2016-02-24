@@ -43,6 +43,12 @@
 // size of inner loop to get microphone min max levels
 #define CNT_MAX 3000
 
+// number of samples used to calibrate min and max
+#define CALIBRATION_SAMPLES 50
+
+// size of diff histo for calibration
+#define CALIBRATION_HISTO_SIZE 10
+
 #define LINE "--------------------------"
 
 // lora end-device address (DevAddr)
@@ -76,6 +82,13 @@ int cnt, val_min, val_max, diff;
 // global vars for accumulated noise measures
 int acc_max, acc_sum, acc_cnt, samples_cnt;
 long acc_start;
+
+// global vars for calibration
+int calibration_diff[CALIBRATION_SAMPLES];
+int calibration_histo[CALIBRATION_HISTO_SIZE];
+
+// minimum difference for noise reading (updated during calibration)
+int diff_min;
 
 // variable to check if node is in transmission mode
 boolean nodeIsTransmitting = false;
@@ -220,7 +233,45 @@ void loop() {
   
       // update/print current noise level
       if(cnt == CNT_MAX) {
-        diff = smoothDiff(val_max - val_min);
+        // init calibration histo
+        if(acc_cnt == 0) {
+          for(int i = 0; i < CALIBRATION_HISTO_SIZE; i++) {
+            calibration_histo[i] = 0;
+          }
+        }
+        // check if we are in calibration mode
+        if(acc_cnt < CALIBRATION_SAMPLES) {
+          calibration_diff[acc_cnt] = val_max - val_min;
+        }
+        else if(acc_cnt == CALIBRATION_SAMPLES) {
+          // update histogram for calibration
+          for(int i = 0; i < CALIBRATION_SAMPLES; i++) {
+            if(calibration_diff[i] < CALIBRATION_HISTO_SIZE) {
+              calibration_histo[calibration_diff[i]]++;
+            }
+          }
+
+          int min_pos = 0;
+
+          for(int i = 1; i < CALIBRATION_HISTO_SIZE; i++) {
+            if(calibration_histo[i] > calibration_histo[min_pos]) {
+              min_pos = i;
+            }
+          }
+
+          // update diff_min
+          diff_min = min_pos;
+
+          if(PRINT_DEBUG) {
+            Serial.println(LINE);
+            Serial.print("new calibration difference: ");
+            Serial.println(diff_min);
+            Serial.println(LINE);
+          }
+          
+        }
+        
+        diff = smoothDiff(val_max - val_min, diff_min);
         printDiff(diff, acc_cnt);
         updateNoiseLevelValues(diff);
         resetSensorValues();
@@ -325,6 +376,9 @@ void initSensor() {
   //analogReference(INTERNAL);
   pinMode(PIN_NOISE, INPUT);
 
+  // init min noise reading differences
+  diff_min = 0;
+  
   // reset number of samples sent
   samples_cnt = 0;
 }
@@ -368,17 +422,14 @@ void updateNoiseLevelValues(int d) {
   dataReadyToSend = true;
 }
 
-// diff values of 2 and below don't seem to be meaningful
-int smoothDiff(int d) {
-  if(d >= 2) {
-    return d - 2;
+// diff values below the calibrated minimum difference are not meaningful
+int smoothDiff(int d, int dMin) {
+  if(d < dMin) {
+    return 0;
   }
-  
-  if(d >= 1) {
-    return d - 1;
+  else {
+    return d - dMin;
   }
-
-  return d;
 }
 
 // print current noise level
