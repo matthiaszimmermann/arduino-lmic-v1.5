@@ -28,6 +28,8 @@
 #include <hal/hal.h>
 #include <SPI.h>
 
+#define SCHEDULE_WINDOW_SECONDS 30
+
 // LoRaWAN Application identifier (AppEUI)
 // Not used in this example
 static const u1_t APPEUI[8]  = { 0x02, 0x00, 0x00, 0x00, 0x00, 0xEE, 0xFF, 0xC0 };
@@ -46,7 +48,7 @@ static const u1_t ARTKEY[16] = { 0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
 
 // LoRaWAN end-device address (DevAddr)
 // See http://thethingsnetwork.org/wiki/AddressSpace
-static const u4_t DEVADDR = 0x03FF0001 ; // <-- Change this address for every node!
+static const u4_t DEVADDR = 0x5A480104 ; // <-- Change this address for every node!
 
 //////////////////////////////////////////////////
 // APPLICATION CALLBACKS
@@ -114,13 +116,14 @@ void do_send(osjob_t* j){
       LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
     }
     // Schedule a timed job to run at the given timestamp (absolute system time)
-    os_setTimedCallback(j, os_getTime()+sec2osticks(120), do_send);
+    os_setTimedCallback(j, os_getTime()+sec2osticks(SCHEDULE_WINDOW_SECONDS), do_send);
          
 }
 
 void setup() {
   Serial.begin(9600);
   Serial.println("Starting");
+  delay(2000);
   // LMIC init
   os_init();
   // Reset the MAC state. Session and pending data transfers will be discarded.
@@ -144,10 +147,10 @@ void setup() {
 
 void loop() {
 
-do_send(&sendjob);
+  Serial.println("do_send from loop()");
+  do_send(&sendjob);
 
-while(1) {
-  os_runloop_once();
+  while(1) {
+    os_runloop_once();
   }
 }
-
