@@ -94,23 +94,11 @@ int diff_min;
 boolean nodeIsTransmitting = false;
 boolean dataReadyToSend = false;
 
+// char buffer for lora payload data
 uint8_t loraData[] = "Hello, world!";
+
+// lora send job
 static osjob_t sendJob;
-
-// provide application router id (8 bytes, LSBF)
-void os_getArtEui (u1_t* buf) {
-    memcpy(buf, APPEUI, 8);
-}
-
-// provide device id (8 bytes, LSBF)
-void os_getDevEui (u1_t* buf) {
-    memcpy(buf, DEVEUI, 8);
-}
-
-// provide device key (16 bytes)
-void os_getDevKey (u1_t* buf) {
-    memcpy(buf, DEVKEY, 16);
-}
 
 // pin mapping for communication between the teensy lc and the rfm95
 lmic_pinmap pins = {
@@ -120,34 +108,183 @@ lmic_pinmap pins = {
   .dio = {2, 5, 6},
 };
 
-void onEvent (ev_t ev) {
-    switch(ev) {
-      // scheduled data sent (optionally data received)
-      // note: this includes the receive window!
-      case EV_TXCOMPLETE:
-          // use this event to keep track of actual transmissions
-          if(PRINT_DEBUG) {
-            Serial.print("LMIC EV_TXCOMPLETE, time: ");
-            Serial.println(millis() / 1000);
-          }
-          
-          if(LMIC.dataLen) { // data received in rx slot after tx
-              //debug_buf(LMIC.frame+LMIC.dataBeg, LMIC.dataLen);
-              if(PRINT_DEBUG) {
-                Serial.println("LMIC Data Received!");
-              }
-          }
+void setup() {
+  Serial.begin(9600);
+  delay(1000);
+  
+  if(PRINT_DEBUG) {
+    Serial.println(LINE);
+    Serial.println("Starting setup ...");
+  }
 
-          if(PRINT_DEBUG) {
-            Serial.println(LINE);
-          }
-          
-          nodeIsTransmitting = false;    
-          break;
-          
-      default:
-          break;
+  initLora();
+  initSensor();
+  resetRawSensorValues();
+  resetNoiseLevelValues();
+  
+  if(PRINT_DEBUG) {
+    Serial.println(LINE);
+  }
+}
+
+void loop() {
+  sendLora(&sendJob);
+
+  while(1) {
+    if(!nodeIsTransmitting) {
+      updateRawSensorValues(analogRead(PIN_NOISE));
+  
+      // update/print current noise level
+      if(cnt == CNT_MAX) {
+        updateNoiseLevelCalibration();        
+        diff = smoothDiff(val_max - val_min, diff_min);
+        printDiff(diff, acc_cnt);
+        updateNoiseLevelValues(diff);
+        resetRawSensorValues();
+      }
     }
+
+    os_runloop_once();    
+  }
+}
+
+// configure lora module
+void initLora() {
+  if(!LORA_ENABLE) {
+    if(PRINT_DEBUG) {
+      Serial.println("WARNING: LoRA disabled, not connecting");
+    }
+    
+    return;
+  }
+  
+  if(PRINT_DEBUG) {
+    Serial.println("Configuring LoRa module...");
+  }
+  
+  // LMIC init
+  os_init();
+  // Reset the MAC state. Session and pending data transfers will be discarded.
+  LMIC_reset();
+  // Set static session parameters. Instead of dynamically establishing a session 
+  // by joining the network, precomputed session parameters are be provided.
+  LMIC_setSession (0x1, DEVADDR, (uint8_t*)DEVKEY, (uint8_t*)ARTKEY);
+  // Disable data rate adaptation
+  LMIC_setAdrMode(0);
+  // Disable link check validation
+  LMIC_setLinkCheckMode(0);
+  // Disable beacon tracking
+  LMIC_disableTracking ();
+  // Stop listening for downstream data (periodical reception)
+  LMIC_stopPingable();
+  // Set data rate and transmit power (note: txpow seems to be ignored by the library)
+  LMIC_setDrTxpow(DR_SF7,14);
+  
+  if(PRINT_DEBUG) {
+    Serial.println("LoRa module ready");
+  }
+}
+
+// init sensor values and noise related variables
+void initSensor() {
+  // set unused pins to output
+  pinMode(3, OUTPUT);
+  pinMode(4, OUTPUT);
+
+  for(int i = 15; i <=23; i++) {
+    pinMode(i, OUTPUT);
+  }
+
+  // set pin for microphone
+  pinMode(PIN_NOISE, INPUT);
+
+  // init min noise reading differences
+  diff_min = 0;
+  
+  // reset number of samples sent
+  samples_cnt = 0;
+}
+
+// reset variables for raw noise measurments
+void resetRawSensorValues() {
+  cnt = 0;
+  val_min = 2000;
+  val_max = 0;
+  diff = 0;
+}
+
+// reset variables for accumulated noise measurments
+void resetNoiseLevelValues() {
+  acc_cnt = 0;
+  acc_sum = 0;
+  acc_max = 0;
+}
+
+// update variables for raw noise measurments
+void updateRawSensorValues(int val) {
+  if (val < val_min) { val_min = val; }
+  if (val > val_max) { val_max = val; }
+  
+  cnt++;
+}
+
+// update calibration of noise level differences
+void updateNoiseLevelCalibration() {
+  
+  // init calibration histo
+  if(acc_cnt == 0) {
+    for(int i = 0; i < CALIBRATION_HISTO_SIZE; i++) {
+      calibration_histo[i] = 0;
+    }
+  }
+  
+  // collecting samples for calibration
+  if(acc_cnt < CALIBRATION_SAMPLES) {
+    calibration_diff[acc_cnt] = val_max - val_min;
+  }
+  // computing current calibration
+  else if(acc_cnt == CALIBRATION_SAMPLES) {
+    // update histogram for calibration
+    for(int i = 0; i < CALIBRATION_SAMPLES; i++) {
+      if(calibration_diff[i] < CALIBRATION_HISTO_SIZE) {
+        calibration_histo[calibration_diff[i]]++;
+      }
+    }
+
+    // reset diff_min
+    diff_min = 0;
+
+    // find best diff_min. 
+    // assumpion: most frequent noise diff value represents silence
+    for(int i = 1; i < CALIBRATION_HISTO_SIZE; i++) {
+      if(calibration_histo[i] > calibration_histo[diff_min]) {
+        diff_min = i;
+      }
+    }
+
+    if(PRINT_DEBUG) {
+      Serial.println(LINE);
+      Serial.print("new calibration difference: ");
+      Serial.println(diff_min);
+      Serial.println(LINE);
+    }
+  }
+}
+
+// update variables for accumulated noise measurments
+void updateNoiseLevelValues(int d) {
+  if(acc_cnt == 0) {
+    acc_start = millis();
+  }
+  
+  if (diff > acc_max) { 
+    acc_max = d; 
+  }
+
+  acc_sum += d;
+  acc_cnt++;
+
+  dataReadyToSend = true;
 }
 
 void sendLora(osjob_t* job){
@@ -204,118 +341,34 @@ void sendLora(osjob_t* job){
   }
 }
 
-void setup() {
-  Serial.begin(9600);
-  delay(1000);
-  
-  if(PRINT_DEBUG) {
-    Serial.println(LINE);
-    Serial.println("Starting setup ...");
-  }
-
-  initLora();
-  initSensor();
-  resetSensorValues();
-  resetNoiseLevelValues();
-  
-  if(PRINT_DEBUG) {
-    Serial.println(LINE);
-  }
-}
-
-void loop() {
-  sendLora(&sendJob);
-
-  while(1) {
-    if(!nodeIsTransmitting) {
-      // update noise level vars from sensor value
-      updateSensorValues(analogRead(PIN_NOISE));
-  
-      // update/print current noise level
-      if(cnt == CNT_MAX) {
-        // init calibration histo
-        if(acc_cnt == 0) {
-          for(int i = 0; i < CALIBRATION_HISTO_SIZE; i++) {
-            calibration_histo[i] = 0;
-          }
-        }
-        // check if we are in calibration mode
-        if(acc_cnt < CALIBRATION_SAMPLES) {
-          calibration_diff[acc_cnt] = val_max - val_min;
-        }
-        else if(acc_cnt == CALIBRATION_SAMPLES) {
-          // update histogram for calibration
-          for(int i = 0; i < CALIBRATION_SAMPLES; i++) {
-            if(calibration_diff[i] < CALIBRATION_HISTO_SIZE) {
-              calibration_histo[calibration_diff[i]]++;
-            }
-          }
-
-          int min_pos = 0;
-
-          for(int i = 1; i < CALIBRATION_HISTO_SIZE; i++) {
-            if(calibration_histo[i] > calibration_histo[min_pos]) {
-              min_pos = i;
-            }
-          }
-
-          // update diff_min
-          diff_min = min_pos;
-
-          if(PRINT_DEBUG) {
-            Serial.println(LINE);
-            Serial.print("new calibration difference: ");
-            Serial.println(diff_min);
-            Serial.println(LINE);
-          }
-          
-        }
-        
-        diff = smoothDiff(val_max - val_min, diff_min);
-        printDiff(diff, acc_cnt);
-        updateNoiseLevelValues(diff);
-        resetSensorValues();
+// lora callback: transmission completed, ...
+void onEvent (ev_t ev) {
+  switch(ev) {
+    // scheduled data sent (optionally data received)
+    // note: this includes the receive window!
+    case EV_TXCOMPLETE:
+      // use this event to keep track of actual transmissions
+      if(PRINT_DEBUG) {
+        Serial.print("LMIC EV_TXCOMPLETE, time: ");
+        Serial.println(millis() / 1000);
       }
-    }
+      
+      if(LMIC.dataLen) { // data received in rx slot after tx
+        //debug_buf(LMIC.frame+LMIC.dataBeg, LMIC.dataLen);
+        if(PRINT_DEBUG) {
+          Serial.println("LMIC Data Received!");
+        }
+      }
 
-    os_runloop_once();    
-  }
-}
-
-// configure lora module
-void initLora() {
-  if(!LORA_ENABLE) {
-    if(PRINT_DEBUG) {
-      Serial.println("WARNING: LoRA disabled, not connecting");
-    }
-    
-    return;
-  }
-  
-  if(PRINT_DEBUG) {
-    Serial.println("Configuring LoRa module...");
-  }
-  
-  // LMIC init
-  os_init();
-  // Reset the MAC state. Session and pending data transfers will be discarded.
-  LMIC_reset();
-  // Set static session parameters. Instead of dynamically establishing a session 
-  // by joining the network, precomputed session parameters are be provided.
-  LMIC_setSession (0x1, DEVADDR, (uint8_t*)DEVKEY, (uint8_t*)ARTKEY);
-  // Disable data rate adaptation
-  LMIC_setAdrMode(0);
-  // Disable link check validation
-  LMIC_setLinkCheckMode(0);
-  // Disable beacon tracking
-  LMIC_disableTracking ();
-  // Stop listening for downstream data (periodical reception)
-  LMIC_stopPingable();
-  // Set data rate and transmit power (note: txpow seems to be ignored by the library)
-  LMIC_setDrTxpow(DR_SF7,14);
-  
-  if(PRINT_DEBUG) {
-    Serial.println("LoRa module ready");
+      if(PRINT_DEBUG) {
+        Serial.println(LINE);
+      }
+      
+      nodeIsTransmitting = false;    
+      break;
+      
+    default:
+      break;
   }
 }
 
@@ -362,64 +415,8 @@ double getNoiseLevelNormalized() {
   return acc_sum / ((millis() - acc_start) / 1000.0);
 }
 
-// set reference to internal to increase sensitivity
-void initSensor() {
-  // set unused pins to output
-  pinMode(3, OUTPUT);
-  pinMode(4, OUTPUT);
-
-  for(int i = 15; i <=23; i++) {
-    pinMode(i, OUTPUT);
-  }
-
-  // set pin for microphone
-  //analogReference(INTERNAL);
-  pinMode(PIN_NOISE, INPUT);
-
-  // init min noise reading differences
-  diff_min = 0;
-  
-  // reset number of samples sent
-  samples_cnt = 0;
-}
-
-void resetSensorValues() {
-  cnt = 0;
-  val_min = 2000;
-  val_max = 0;
-  diff = 0;
-}
-
 double sampleTime() {
   return (millis() - acc_start) / 1000.0;
-}
-
-void resetNoiseLevelValues() {
-  acc_cnt = 0;
-  acc_sum = 0;
-  acc_max = 0;
-}
-
-void updateSensorValues(int val) {
-  if (val < val_min) { val_min = val; }
-  if (val > val_max) { val_max = val; }
-  
-  cnt++;
-}
-
-void updateNoiseLevelValues(int d) {
-  if(acc_cnt == 0) {
-    acc_start = millis();
-  }
-  
-  if (diff > acc_max) { 
-    acc_max = d; 
-  }
-
-  acc_sum += d;
-  acc_cnt++;
-
-  dataReadyToSend = true;
 }
 
 // diff values below the calibrated minimum difference are not meaningful
@@ -481,5 +478,20 @@ void printNoiseLevel() {
     Serial.print(")");
     Serial.println();
   }
+}
+
+// provide application router id (8 bytes, LSBF)
+void os_getArtEui (u1_t* buf) {
+  memcpy(buf, APPEUI, 8);
+}
+
+// provide device id (8 bytes, LSBF)
+void os_getDevEui (u1_t* buf) {
+  memcpy(buf, DEVEUI, 8);
+}
+
+// provide device key (16 bytes)
+void os_getDevKey (u1_t* buf) {
+  memcpy(buf, DEVKEY, 16);
 }
 
